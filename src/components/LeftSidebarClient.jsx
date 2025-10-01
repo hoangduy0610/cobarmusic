@@ -1,8 +1,9 @@
+// src/components/LeftSidebarClient.jsx
 "use client";
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { ShoppingBag, BookOpen, LogOut } from "lucide-react";
+import { ShoppingBag, BookOpen, LogOut, UserRound } from "lucide-react";
 
 export default function LeftSidebarClient({ me }) {
   const pathname = usePathname();
@@ -18,21 +19,15 @@ export default function LeftSidebarClient({ me }) {
   const isMarket = pathname === "/" || pathname.startsWith("/songs");
   const isLibrary = pathname.startsWith("/mysongs");
 
+  const isLoggedIn = !!(me && (me.email || me.name));
+
   async function handleLogout() {
     await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
     router.push("/login");
   }
 
-  const isLoggedIn = !!me;
-
-  // Nếu chưa login → hiển thị welcome info
-  const displayName = isLoggedIn
-    ? me?.email || me?.name || "User"
-    : "Welcome CobarFan";
-  const avatarUrl = isLoggedIn
-    ? me?.avatar || "/default-avatar.png"
-    : "/default-avatar.png";
-  const credits = isLoggedIn ? me?.credits ?? 0 : 0;
+  const displayName = isLoggedIn ? me.email || me.name || "User" : "Welcome CobarFan";
+  const credits = isLoggedIn ? me.credits ?? 0 : 0;
 
   return (
     <aside
@@ -41,11 +36,19 @@ export default function LeftSidebarClient({ me }) {
     >
       {/* ===== Top: User info ===== */}
       <div className="p-4 flex items-center space-x-3">
-        <img
-          src={avatarUrl}
-          alt="avatar"
-          className="w-12 h-12 rounded-full object-cover"
-        />
+        {/* Avatar: nếu có ảnh thì dùng img, nếu không thì icon đẹp */}
+        {isLoggedIn && me?.avatar ? (
+          <img
+            src={me.avatar}
+            alt="avatar"
+            className="w-12 h-12 rounded-full object-cover"
+          />
+        ) : (
+          <div className="w-12 h-12 rounded-full bg-gray-800 flex items-center justify-center">
+            <UserRound className="w-7 h-7 text-gray-300" />
+          </div>
+        )}
+
         <div className="min-w-0">
           <p className="font-semibold truncate">{displayName}</p>
           <span className="text-xs text-gray-400">
@@ -66,7 +69,7 @@ export default function LeftSidebarClient({ me }) {
           <span>Library</span>
         </Link>
 
-        {/* Chỉ hiện Sign out nếu đã login */}
+        {/* Chỉ hiện Sign out khi đã login */}
         {isLoggedIn && (
           <button
             onClick={handleLogout}
