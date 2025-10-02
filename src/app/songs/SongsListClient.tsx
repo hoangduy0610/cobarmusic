@@ -116,20 +116,20 @@ export default function SongsListClient({
         a.crossOrigin = "anonymous";
         a.src = url;
 
-        // đợi có thể phát (metadata sẵn sàng)
-        await new Promise<void>((resolve, reject) => {
-          const onCanPlay = () => {
-            a.removeEventListener("canplay", onCanPlay);
-            resolve();
-          };
-          const onErr = () => {
-            a.removeEventListener("canplay", onCanPlay);
-            reject(a.error);
-          };
-          a.addEventListener("canplay", onCanPlay, { once: true });
-          a.addEventListener("error", onErr, { once: true });
-          a.load();
-        });
+        // đợi metadata (có duration) — bền hơn giữa các trình duyệt
+await new Promise<void>((resolve, reject) => {
+   const onLoadedMeta = () => {
+    a.removeEventListener("loadedmetadata", onLoadedMeta);
+    resolve();
+   };
+  const onErr = () => {
+    a.removeEventListener("loadedmetadata", onLoadedMeta);
+     reject(a.error);
+  };
+  a.addEventListener("loadedmetadata", onLoadedMeta, { once: true });
+  a.addEventListener("error", onErr, { once: true });
+   a.load();
+ });
 
         if (cancelled) return;
 
@@ -502,7 +502,7 @@ export default function SongsListClient({
           </div>
 
           {/* Thêm crossOrigin để stream Supabase mượt hơn */}
-          <audio ref={audioRef} crossOrigin="anonymous" />
+          <audio ref={audioRef} crossOrigin="anonymous" preload="metadata" playsInline />
         </div>
       )}
 
