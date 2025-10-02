@@ -18,7 +18,7 @@ type SongDTO = {
   genres: Genre[];
   seller: Seller;
   owned: boolean;
-  previewPath: string;   // path trong bucket private
+  previewPath: string;
   avatar?: string | null;
 };
 
@@ -27,162 +27,268 @@ const PLAYER_H = 96;
 function formatTime(sec: number) {
   if (!Number.isFinite(sec)) return "0:00";
   const m = Math.floor(sec / 60);
-  const s = Math.floor(sec % 60)
-    .toString()
-    .padStart(2, "0");
+  const s = Math.floor(sec % 60).toString().padStart(2, "0");
   return `${m}:${s}`;
 }
 
-export default function SongsListClient({
-  initialSongs,
-}: {
-  initialSongs: SongDTO[];
-}) {
+// Hiển thị giá đẹp (ưu tiên VND; nếu string đã định dạng sẵn thì giữ nguyên)
+function formatPriceVND(p: string | number) {
+  if (typeof p === "number") {
+    return new Intl.NumberFormat("vi-VN").format(p) + "₫";
+  }
+  const num = Number(p);
+  if (!Number.isNaN(num) && String(num) === p.trim()) {
+    return new Intl.NumberFormat("vi-VN").format(num) + "₫";
+  }
+  return p;
+}
+
+export default function SongsListClient({ initialSongs }: { initialSongs: SongDTO[] }) {
   const [songs, setSongs] = useState<SongDTO[]>(initialSongs);
   const [index, setIndex] = useState<number | null>(null);
-  const [playing, setPlaying] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const objectUrlRef = useRef<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  // refs để đọc giá trị mới nhất trong event handler
+  const indexRef = useRef<number | null>(index);
+  const songsRef = useRef<SongDTO[]>(songs);
+  useEffect(() => { indexRef.current = index; }, [index]);
+  useEffect(() => { songsRef.current = songs; }, [songs]);
+
+  // ==== đếm lượt nghe (mỗi bài 1 lần/phiên, khi > 10s) ====
+  const listenedSetRef = useRef<Set<number>>(new Set()); // lưu các id đã đếm trong phiên
+  const listenFiredRef = useRef<boolean>(false);         // cờ cho bài hiện tại
+
+  // UI states
+  const [, forceTick] = useState(0); // ép re-render (đọc paused từ <audio>)
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
-
-  // streaming state
   const [loadingStream, setLoadingStream] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
-
-  // modal login
   const [showLogin, setShowLogin] = useState(false);
-
-  // modal QR
   const [qrOpen, setQrOpen] = useState(false);
   const [qrString, setQrString] = useState("");
   const [paymentSessionId, setPaymentSessionId] = useState("");
 
-  const current = index !== null ? songs[index] : null;
-  const hasPrev = index !== null && index > 0;
-  const hasNext = index !== null && index < songs.length - 1;
+  // interval cập nhật tiến độ (fallback nếu timeupdate thưa)
+  const progressIntervalRef = useRef<number | null>(null);
+  const startProgress = () => {
+    stopProgress();
+    progressIntervalRef.current = window.setInterval(() => {
+      const a = audioRef.current;
+      if (!a) return;
+      setCurrentTime(a.currentTime || 0);
+    }, 100); // 10 lần/giây
+  };
+  const stopProgress = () => {
+    if (progressIntervalRef.current) {
+      clearInterval(progressIntervalRef.current);
+      progressIntervalRef.current = null;
+    }
+  };
 
-  // ===== LẤY SIGNED URL VÀ PHÁT NHẠC (Supabase) =====
+  const current = index !== null ? songs[index] : null;
+
+  // đồng bộ volume
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.volume = volume;
+  }, [volume]);
+
+  // ===== LOAD PREVIEW (Blob → ObjectURL) =====
   useEffect(() => {
     let cancelled = false;
 
     async function loadAndPlayPreview() {
-      if (!current || !audioRef.current) return;
-
       const a = audioRef.current;
+      if (!current || !a) return;
 
-      // reset nguồn cũ để tránh race condition khi đổi bài nhanh
+      // cleanup nguồn cũ
+      abortRef.current?.abort();
+      abortRef.current = new AbortController();
+      const signal = abortRef.current.signal;
+
+      stopProgress();
       a.pause();
-      a.removeAttribute("src");
+      if (a.src) a.removeAttribute("src");
       a.load();
 
-      setPlaying(false);
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
+        objectUrlRef.current = null;
+      }
+
       setLoadingStream(true);
       setStreamError(null);
       setDuration(0);
       setCurrentTime(0);
-
-      // bắt lỗi phần tử <audio>
-      const onAudioError = () => {
-        if (cancelled) return;
-        const code = a.error?.code;
-        const msg =
-          code === 1 ? "ABORTED" :
-          code === 2 ? "NETWORK" :
-          code === 3 ? "DECODE" :
-          code === 4 ? "SRC_NOT_SUPPORTED" : "UNKNOWN";
-        setStreamError(`Audio error: ${msg}`);
-        setLoadingStream(false);
-        setPlaying(false);
-      };
-      a.addEventListener("error", onAudioError);
+      listenFiredRef.current = false; // reset cờ đếm khi đổi bài
+      forceTick((n) => n + 1); // cập nhật icon ngay
 
       try {
+        // 1) lấy signed url
         const r = await fetch(`/api/songs/${current.id}/stream?kind=preview`, {
           cache: "no-store",
+          signal,
         });
-        if (!r.ok) {
-          const t = await r.text().catch(() => "");
-          throw new Error(`${r.status}:${t || "stream error"}`);
-        }
+        if (!r.ok) throw new Error(await r.text().catch(() => "stream error"));
         const data = await r.json();
-        const url = data?.url as string;
-        if (!url) throw new Error("missing url");
-
+        const signed: string | undefined = data?.url;
+        if (!signed) throw new Error("missing url");
         if (cancelled) return;
 
-        // gán nguồn mới và thiết lập CORS
+        // 2) tải blob
+        const resp = await fetch(signed, { mode: "cors", cache: "no-store", signal });
+        if (!resp.ok) throw new Error("download preview failed");
+        const blob = await resp.blob();
+        if (cancelled) return;
+
+        // 3) phát từ objectURL
+        const url = URL.createObjectURL(blob);
+        objectUrlRef.current = url;
+
         a.crossOrigin = "anonymous";
+        a.preload = "metadata";
         a.src = url;
 
-        // đợi metadata (có duration) — bền hơn giữa các trình duyệt
-await new Promise<void>((resolve, reject) => {
-   const onLoadedMeta = () => {
-    a.removeEventListener("loadedmetadata", onLoadedMeta);
-    resolve();
-   };
-  const onErr = () => {
-    a.removeEventListener("loadedmetadata", onLoadedMeta);
-     reject(a.error);
-  };
-  a.addEventListener("loadedmetadata", onLoadedMeta, { once: true });
-  a.addEventListener("error", onErr, { once: true });
-   a.load();
- });
+        await new Promise<void>((resolve, reject) => {
+          const onLoadedMeta = () => {
+            a.removeEventListener("loadedmetadata", onLoadedMeta);
+            const d = a.duration;
+            setDuration(Number.isFinite(d) && d > 0 ? d : 0);
+            resolve();
+          };
+          const onErr = () => {
+            a.removeEventListener("loadedmetadata", onLoadedMeta);
+            reject(a.error);
+          };
+          a.addEventListener("loadedmetadata", onLoadedMeta, { once: true });
+          a.addEventListener("error", onErr, { once: true });
+          a.load();
+        });
 
         if (cancelled) return;
 
-        await a.play();
-        setPlaying(true);
+        await a.play();              // sẽ bắn event 'play'
+        startProgress();             // bật ngay cả khi event play trễ
         setLoadingStream(false);
-
-        // log lượt nghe (không chặn UI)
-        fetch(`/api/songs/${current.id}/listen`, { method: "POST" }).catch(() => {});
+        forceTick((n) => n + 1);     // cập nhật icon
       } catch (err: any) {
-        if (cancelled) return;
-        setStreamError(err?.message || "Stream failed");
-        setLoadingStream(false);
-        setPlaying(false);
-      } finally {
-        a.removeEventListener("error", onAudioError);
+        if (!cancelled && err?.name !== "AbortError") {
+          setStreamError(err?.message || "Stream failed");
+          setLoadingStream(false);
+          stopProgress();
+          forceTick((n) => n + 1);
+        }
       }
     }
 
     loadAndPlayPreview();
     return () => {
       cancelled = true;
+      abortRef.current?.abort();
+      stopProgress();
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
+        objectUrlRef.current = null;
+      }
     };
   }, [index, current?.id]);
 
-  // ===== RÀNG BUỘC SỰ KIỆN AUDIO =====
+  // ===== AUDIO EVENTS: sync tiến độ + icon =====
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
-    const onTime = () => setCurrentTime(a.currentTime || 0);
-    const onMeta = () => setDuration(a.duration || 0);
-    const onEnd = () => {
-      if (hasNext) setIndex((i) => (i === null ? 0 : i + 1));
-      else setPlaying(false);
+
+    const onPlay = () => {
+      startProgress();
+      forceTick((n) => n + 1);
     };
-    a.addEventListener("timeupdate", onTime);
-    a.addEventListener("loadedmetadata", onMeta);
-    a.addEventListener("ended", onEnd);
+
+    const onPause = () => {
+      stopProgress();
+      forceTick((n) => n + 1);
+    };
+
+    const onEnded = () => {
+      a.pause();
+      stopProgress();
+      setCurrentTime(0);
+      forceTick((n) => n + 1);
+
+      // next track nếu còn
+      const i = indexRef.current;
+      const arr = songsRef.current;
+      if (i !== null && i < arr.length - 1) {
+        setIndex(i + 1);
+      }
+    };
+
+    const onTimeUpdate = () => setCurrentTime(a.currentTime || 0);
+    const onLoadedMeta = () => setDuration(Number.isFinite(a.duration) ? a.duration : 0);
+
+    a.addEventListener("play", onPlay);
+    a.addEventListener("pause", onPause);
+    a.addEventListener("ended", onEnded);
+    a.addEventListener("timeupdate", onTimeUpdate);
+    a.addEventListener("loadedmetadata", onLoadedMeta);
+
     return () => {
-      a.removeEventListener("timeupdate", onTime);
-      a.removeEventListener("loadedmetadata", onMeta);
-      a.removeEventListener("ended", onEnd);
+      a.removeEventListener("play", onPlay);
+      a.removeEventListener("pause", onPause);
+      a.removeEventListener("ended", onEnded);
+      a.removeEventListener("timeupdate", onTimeUpdate);
+      a.removeEventListener("loadedmetadata", onLoadedMeta);
+      stopProgress();
     };
-  }, [hasNext]);
+  }, []);
+
+  // ===== Đếm lượt nghe: khi nghe > 10s, gửi 1 lần/bài/phiên =====
+  useEffect(() => {
+    const a = audioRef.current;
+    if (!a || !current) return;
+
+    if (listenedSetRef.current.has(current.id)) return; // đã đếm trong phiên
+
+    const checkAndFire = () => {
+      if (!current) return;
+      const t = a.currentTime || 0;
+      if (t >= 10 && !listenFiredRef.current) {
+        listenFiredRef.current = true;
+        listenedSetRef.current.add(current.id);
+
+        // Fire & forget
+        fetch(`/api/songs/${current.id}/listen`, { method: "POST" }).catch(() => {});
+
+        // (Optional) Optimistic UI: +1 ngay
+        setSongs((prev) =>
+          prev.map((it) => (it.id === current.id ? { ...it, listens: it.listens + 1 } : it))
+        );
+      }
+    };
+
+    a.addEventListener("timeupdate", checkAndFire);
+    const iv = window.setInterval(checkAndFire, 1000);
+
+    return () => {
+      a.removeEventListener("timeupdate", checkAndFire);
+      clearInterval(iv);
+    };
+  }, [current?.id]);
 
   function togglePlay() {
     const a = audioRef.current;
     if (!a) return;
-    if (a.paused) a.play().then(() => setPlaying(true));
-    else {
+    if (a.paused) {
+      a.play();
+      startProgress();
+    } else {
       a.pause();
-      setPlaying(false);
+      stopProgress();
     }
+    forceTick((n) => n + 1);
   }
 
   async function reloadSongs() {
@@ -191,17 +297,12 @@ await new Promise<void>((resolve, reject) => {
     setSongs(data.items);
   }
 
-  // Khi thanh toán thành công (PaymentQRModal gọi onSuccess)
   async function handlePaymentSuccess() {
-    await reloadSongs(); // cập nhật owned=true
-    toast.success("Mua thành công, Bạn vào Library để nghe nhé", {
-      duration: 6000,
-      icon: "🎵",
-    });
-    setQrOpen(false); // đóng modal nếu còn mở
+    await reloadSongs();
+    toast.success("Mua thành công, Bạn vào Library để nghe nhé", { duration: 6000, icon: "🎵" });
+    setQrOpen(false);
   }
 
-  // === Buy bằng QR (polling) ===
   async function buySong(songId: number) {
     try {
       const r = await fetch("/api/payments/create", {
@@ -209,25 +310,19 @@ await new Promise<void>((resolve, reject) => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ songId }),
       });
-
-      if (r.status === 401 || r.status === 403) {
-        setShowLogin(true); // mở modal login
-        return;
-      }
-      if (!r.ok) {
-        const e = await r.json().catch(() => ({}));
-        alert(e?.error || "Create payment failed");
-        return;
-      }
-
+      if (r.status === 401 || r.status === 403) { setShowLogin(true); return; }
+      if (!r.ok) { const e = await r.json().catch(() => ({})); alert(e?.error || "Create payment failed"); return; }
       const data = await r.json();
       setQrString(data.qrString);
       setPaymentSessionId(data.sessionId);
       setQrOpen(true);
-    } catch (e) {
+    } catch {
       alert("Create payment error");
     }
   }
+
+  // trạng thái thực từ <audio> để render icon/animation
+  const isPlayingNow = audioRef.current ? !audioRef.current.paused : false;
 
   return (
     <div style={{ minHeight: "100vh", background: "#000", color: "#fff" }}>
@@ -237,107 +332,100 @@ await new Promise<void>((resolve, reject) => {
           maxWidth: 1100,
           margin: "0 auto",
           padding: "24px 16px",
-          // chừa chỗ cho player + bottom nav mobile
           paddingBottom: `calc(var(--bottom-nav-h, 0px) + ${current ? PLAYER_H + 24 : 24}px)`,
           transition: "padding-bottom .2s ease",
         }}
       >
-        {/* Title + Tabs */}
-        <h1 className="text-3xl md:text-[42px] font-semibold tracking-tight mb-3">
-          Marketplace
-        </h1>
-        <Tabs
-          className="mb-6"
-          tabs={[
-            { label: "Songs", href: "/" },
-            { label: "Playlists", comingSoon: true },
-          ]}
-        />
+        <h1 className="text-3xl md:text-[42px] font-semibold tracking-tight mb-3">Marketplace</h1>
+        <Tabs className="mb-6" tabs={[{ label: "Songs", href: "/" }, { label: "Playlists", comingSoon: true }]} />
 
         {/* List */}
         <div style={{ display: "grid", gap: 12 }}>
-          {songs.map((s, i) => (
-            <div
-              key={s.id}
-              className="song-row"
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 16,
-                padding: "12px 16px",
-                border: "1px solid #222",
-                borderRadius: 12,
-                background: "#111",
-              }}
-            >
-              {/* left: avatar + info */}
-              <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-                <div className="cover" style={{ position: "relative", width: 56, height: 56 }}>
-                  <img
-                    src={s.avatar || "/default-avatar.png"}
-                    alt={s.title}
-                    style={{
-                      width: "100%",
-                      height: "100%",
-                      borderRadius: "50%",
-                      objectFit: "cover",
-                    }}
-                  />
-                  <button
-                    className="overlay"
-                    title="Play"
-                    onClick={() => setIndex(i)}
-                    style={{
-                      position: "absolute",
-                      inset: 0,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      borderRadius: "50%",
-                      background: "rgba(0,0,0,.55)",
-                      color: "#fff",
-                      border: "none",
-                      fontSize: 22,
-                      opacity: 0,
-                      pointerEvents: "none",
-                      transition: "opacity .15s ease",
-                      cursor: "pointer",
-                    }}
-                  >
-                    ▶
-                  </button>
-                </div>
+          {songs.map((s, i) => {
+            const isCurrent = index === i;
+            const showEqualizer = isCurrent && isPlayingNow;
 
-                <div>
-                  <div style={{ fontWeight: 700 }}>{s.title}</div>
-                  <div style={{ color: "#9CA3AF", fontSize: 12, marginTop: 2 }}>
-                    {s.genres.map((g) => g.name).join(", ") || "—"} • {String(s.price)} • {s.listens} listens
+            return (
+              <div
+                key={s.id}
+                className="song-row"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 16,
+                  padding: "12px 16px",
+                  border: "1px solid #222",
+                  borderRadius: 12,
+                  background: "#111",
+                }}
+              >
+                {/* left: avatar + info */}
+                <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                  <div className="cover" style={{ position: "relative", width: 56, height: 56 }}>
+                    <img
+                      src={s.avatar || "/default-avatar.png"}
+                      alt={s.title}
+                      style={{ width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" }}
+                    />
+                    <button
+                      className="overlay"
+                      title={showEqualizer ? "Pause" : "Play"}
+                      onClick={() => (isCurrent ? togglePlay() : setIndex(i))}
+                      style={{
+                        position: "absolute",
+                        inset: 0,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        borderRadius: "50%",
+                        background: "rgba(0,0,0,.55)",
+                        color: "#fff",
+                        border: "none",
+                        fontSize: 22,
+                        opacity: 1,
+                        cursor: "pointer",
+                        transition: "opacity .15s ease",
+                      }}
+                    >
+                      {showEqualizer ? (
+                        <span className="eq">
+                          <span className="bar b1" />
+                          <span className="bar b2" />
+                          <span className="bar b3" />
+                        </span>
+                      ) : (
+                        "▶"
+                      )}
+                    </button>
+                  </div>
+
+                  <div>
+                    <div style={{ fontWeight: 700 }}>{s.title}</div>
+                    <div style={{ color: "#9CA3AF", fontSize: 12, marginTop: 2 }}>
+                      {/* BỎ giá ở đây: chỉ còn genres • listens */}
+                      {s.genres.map((g) => g.name).join(", ") || "—"} • {s.listens} listens
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              {/* right: buy */}
-              {!s.owned && (
-                <button
-                  onClick={() => buySong(s.id)}
-                  style={{
-                    border: "1px solid #fff",
-                    background: "transparent",
-                    color: "#fff",
-                    borderRadius: 8,
-                    padding: "8px 14px",
-                  }}
-                >
-                  Buy
-                </button>
-              )}
-            </div>
-          ))}
+                {/* right: Buy Now (gradient + có giá) */}
+                {!s.owned && (
+                  <button
+                    onClick={() => buySong(s.id)}
+                    className="buy-btn"
+                    title="Buy this track"
+                  >
+                    Buy&nbsp;Now&nbsp;•&nbsp;{formatPriceVND(s.price)}
+                  </button>
+                )}
+              </div>
+            );
+          })}
         </div>
       </main>
 
-      {/* PLAYER — chừa chỗ sidebar bằng CSS var */}
+      {/* PLAYER */}
       {current && (
         <div
           style={{
@@ -364,42 +452,14 @@ await new Promise<void>((resolve, reject) => {
           >
             {/* LEFT */}
             <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
-              <div
-                style={{
-                  width: 52,
-                  height: 52,
-                  borderRadius: 8,
-                  overflow: "hidden",
-                  border: "1px solid #333",
-                  flex: "0 0 52px",
-                }}
-              >
-                <img
-                  src={current.avatar || "/default-avatar.png"}
-                  alt={current.title}
-                  style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                />
+              <div style={{ width: 52, height: 52, borderRadius: 8, overflow: "hidden", border: "1px solid #333", flex: "0 0 52px" }}>
+                <img src={current.avatar || "/default-avatar.png"} alt={current.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
               </div>
               <div style={{ lineHeight: 1.2, overflow: "hidden" }}>
-                <div
-                  style={{
-                    fontWeight: 600,
-                    whiteSpace: "nowrap",
-                    textOverflow: "ellipsis",
-                    overflow: "hidden",
-                  }}
-                >
+                <div style={{ fontWeight: 600, whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden" }}>
                   {current.title}
                 </div>
-                <div
-                  style={{
-                    color: "#bbb",
-                    fontSize: 12,
-                    whiteSpace: "nowrap",
-                    textOverflow: "ellipsis",
-                    overflow: "hidden",
-                  }}
-                >
+                <div style={{ color: "#bbb", fontSize: 12, whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden" }}>
                   {current.seller?.name || current.seller?.email || "Anonymous"}&nbsp;|&nbsp;
                   <span style={{ color: "#eee" }}>{formatTime(currentTime)}</span> / {formatTime(duration)}
                 </div>
@@ -415,75 +475,55 @@ await new Promise<void>((resolve, reject) => {
                     const v = Number(e.target.value);
                     a.currentTime = v;
                     setCurrentTime(v);
+                    forceTick((n) => n + 1);
                   }}
                   title="Seek"
                   style={{ width: 360, accentColor: "#fff", height: 4, marginTop: 6 }}
                 />
-                {loadingStream && (
-                  <div style={{ fontSize: 12, color: "#bbb", marginTop: 6 }}>Loading audio…</div>
-                )}
-                {streamError && (
-                  <div style={{ fontSize: 12, color: "#f87171", marginTop: 6 }}>{streamError}</div>
-                )}
+                {loadingStream && <div style={{ fontSize: 12, color: "#bbb", marginTop: 6 }}>Loading audio…</div>}
+                {streamError && <div style={{ fontSize: 12, color: "#f87171", marginTop: 6 }}>{streamError}</div>}
               </div>
             </div>
 
             {/* CENTER */}
-            <div
-              style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 22 }}
-            >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 22 }}>
               <button
-                onClick={() => hasPrev && setIndex((i) => (i === null ? 0 : i - 1))}
-                disabled={!hasPrev}
-                title="Prev"
-                style={{
-                  fontSize: 24,
-                  background: "none",
-                  border: "none",
-                  color: "#fff",
-                  cursor: hasPrev ? "pointer" : "not-allowed",
-                  opacity: hasPrev ? 1 : 0.4,
+                onClick={() => {
+                  const i = indexRef.current;
+                  if (i === null) return;
+                  setIndex(Math.max(0, i - 1));
                 }}
+                disabled={index === null || index <= 0}
+                title="Prev"
+                style={{ fontSize: 24, background: "none", border: "none", color: "#fff", cursor: index !== null && index > 0 ? "pointer" : "not-allowed", opacity: index !== null && index > 0 ? 1 : 0.4 }}
               >
                 ⏮
               </button>
               <button
                 onClick={togglePlay}
-                title={playing ? "Pause" : "Play"}
-                style={{
-                  fontSize: 28,
-                  background: "none",
-                  border: "none",
-                  color: "#fff",
-                  cursor: "pointer",
-                }}
+                title={isPlayingNow ? "Pause" : "Play"}
+                style={{ fontSize: 28, background: "none", border: "none", color: "#fff", cursor: "pointer" }}
               >
-                {playing ? "⏸" : "▶"}
+                {isPlayingNow ? "⏸" : "▶"}
               </button>
               <button
-                onClick={() => hasNext && setIndex((i) => (i === null ? 0 : i + 1))}
-                disabled={!hasNext}
-                title="Next"
-                style={{
-                  fontSize: 24,
-                  background: "none",
-                  border: "none",
-                  color: "#fff",
-                  cursor: hasNext ? "pointer" : "not-allowed",
-                  opacity: hasNext ? 1 : 0.4,
+                onClick={() => {
+                  const i = indexRef.current;
+                  const arr = songsRef.current;
+                  if (i === null) return;
+                  if (i < arr.length - 1) setIndex(i + 1);
                 }}
+                disabled={index === null || index >= songs.length - 1}
+                title="Next"
+                style={{ fontSize: 24, background: "none", border: "none", color: "#fff", cursor: index !== null && index < songs.length - 1 ? "pointer" : "not-allowed", opacity: index !== null && index < songs.length - 1 ? 1 : 0.4 }}
               >
                 ⏭
               </button>
             </div>
 
             {/* RIGHT */}
-            <div
-              style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12 }}
-            >
-              <span style={{ color: "#fff", fontSize: 16 }}>
-                {volume === 0 ? "🔇" : "🔊"}
-              </span>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12 }}>
+              <span style={{ color: "#fff", fontSize: 16 }}>{volume === 0 ? "🔇" : "🔊"}</span>
               <input
                 type="range"
                 min={0}
@@ -501,7 +541,6 @@ await new Promise<void>((resolve, reject) => {
             </div>
           </div>
 
-          {/* Thêm crossOrigin để stream Supabase mượt hơn */}
           <audio ref={audioRef} crossOrigin="anonymous" preload="metadata" playsInline />
         </div>
       )}
@@ -519,13 +558,61 @@ await new Promise<void>((resolve, reject) => {
         qrString={qrString}
         sessionId={paymentSessionId}
         onClose={() => setQrOpen(false)}
-        onSuccess={handlePaymentSuccess} // show toast + reload
+        onSuccess={handlePaymentSuccess}
       />
 
       <style jsx>{`
         .cover:hover .overlay {
           opacity: 1 !important;
           pointer-events: auto !important;
+        }
+        /* Equalizer animation khi đang phát */
+        .eq {
+          display: inline-flex;
+          align-items: flex-end;
+          gap: 3px;
+          height: 16px;
+        }
+        .bar {
+          width: 3px;
+          height: 100%;
+          background: #fff;
+          transform-origin: bottom;
+          animation: eq-bounce 0.8s ease-in-out infinite;
+        }
+        .b1 { animation-delay: 0s; }
+        .b2 { animation-delay: 0.1s; }
+        .b3 { animation-delay: 0.2s; }
+        @keyframes eq-bounce {
+          0%   { transform: scaleY(0.35); }
+          50%  { transform: scaleY(1); }
+          100% { transform: scaleY(0.35); }
+        }
+
+        /* Buy Now gradient like login */
+        .buy-btn {
+          appearance: none;
+          border: none;
+          color: #fff;
+          font-weight: 600;
+          padding: 10px 16px;
+          border-radius: 10px;
+          background-image: linear-gradient(90deg, #9b5cff 0%, #5a6bff 100%);
+          box-shadow: 0 6px 18px rgba(133, 92, 255, 0.35);
+          transition: transform .08s ease, box-shadow .2s ease, filter .2s ease;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+        .buy-btn:hover {
+          filter: brightness(1.05);
+          box-shadow: 0 8px 22px rgba(133, 92, 255, 0.5);
+        }
+        .buy-btn:active {
+          transform: translateY(1px);
+        }
+        .buy-btn:focus-visible {
+          outline: 2px solid rgba(133, 92, 255, 0.8);
+          outline-offset: 2px;
         }
       `}</style>
     </div>
