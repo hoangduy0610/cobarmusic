@@ -27,8 +27,8 @@ export async function POST(req: Request) {
     const sessionId = crypto.randomUUID();
 
     const qrPayload = {
-      receiver_id: process.env.MEZON_BOT_ID || "mezon-bot",
-      receiver_name: process.env.RECEIVER_NAME || "Cobar VN",
+      receiver_id: 1973241635349204992,
+      receiver_name: "Cobar Music",
       amount,
       note: sessionId,     // dùng để đối soát khi webhook bắn về
       type: "payment",
