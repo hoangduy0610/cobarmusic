@@ -27,7 +27,7 @@ export async function POST(req: Request) {
     const sessionId = crypto.randomUUID();
 
     const qrPayload = {
-      receiver_id: 1973241635349204992,
+      receiver_id: "1973241635349204992",
       receiver_name: "Cobar Music",
       amount,
       note: sessionId,     // dùng để đối soát khi webhook bắn về
