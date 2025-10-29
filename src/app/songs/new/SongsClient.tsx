@@ -26,6 +26,7 @@ export default function SongsClient() {
   const [title, setTitle] = useState("");
   const [price, setPrice] = useState<string>("0");
   const [description, setDescription] = useState("");
+  const [lyric, setLyric] = useState("");
 
   // file chọn (chỉ để hiển thị tên)
   const [previewFile, setPreviewFile] = useState<File | null>(null);
@@ -185,6 +186,7 @@ export default function SongsClient() {
           title: title.trim(),
           price: Number(price) || 0,
           description: description || "",
+          lyric: lyric || "",
           previewPath, // PATH trong bucket private
           fullPath,    // PATH trong bucket private
           avatarUrl: avatarUrl || null, // public URL
@@ -201,6 +203,7 @@ export default function SongsClient() {
         setTitle("");
         setPrice("0");
         setDescription("");
+        setLyric("");
         setPreviewFile(null);
         setFullFile(null);
         setAvatarFile(null);
@@ -314,6 +317,22 @@ export default function SongsClient() {
           <textarea
             value={description}
             onChange={(e) => setDescription(e.target.value)}
+            rows={3}
+            style={{
+              width: "100%",
+              padding: 8,
+              borderRadius: 8,
+              border: "1px solid #333",
+              background: "#0b0b0b",
+              color: "#fff",
+            }}
+          />
+        </div>
+        <div>
+          <label style={{ display: "block", fontWeight: 600 }}>Lyric</label>
+          <textarea
+            value={lyric}
+            onChange={(e) => setLyric(e.target.value)}
             rows={3}
             style={{
               width: "100%",

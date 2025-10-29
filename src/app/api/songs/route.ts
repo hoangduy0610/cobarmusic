@@ -68,6 +68,7 @@ export async function GET(req: Request) {
 }
 
 /** ---------------------- POST /api/songs ---------------------- */
+/** ---------------------- POST /api/songs ---------------------- */
 export async function POST(req: Request) {
   const user = await getCurrentUser();
   if (!user) {
@@ -79,6 +80,7 @@ export async function POST(req: Request) {
     const {
       title,
       description,
+      lyric,           // 🆕 nhận lyric
       price,
       previewPath,
       fullPath,
@@ -97,10 +99,11 @@ export async function POST(req: Request) {
       data: {
         title,
         description: description || null,
+        lyric: lyric || null,          // 🆕 lưu lyric (nullable)
         price: Number(price) || 0,
-        previewPath, // PATH trong bucket private
-        fullPath,    // PATH trong bucket private
-        avatar: avatarUrl || null, // public URL (ảnh)
+        previewPath,                   // PATH private
+        fullPath,                      // PATH private
+        avatar: avatarUrl || null,     // public URL ảnh
         sellerId: user.id,
         ...(genreIds.length
           ? { genres: { connect: genreIds.map((id: number) => ({ id })) } }
@@ -121,3 +124,4 @@ export async function POST(req: Request) {
     );
   }
 }
+

@@ -26,6 +26,7 @@ model User {
   sessions        Session[]
   songs           Song[]
   purchases       Purchase[]
+  comments  Comment[]   
 }
 
 model Session {
@@ -51,6 +52,7 @@ model Song {
   previewPath     String
   fullPath        String
   description     String?
+  lyric           String?
   price           Decimal          @db.Decimal(10, 2)
   listens         Int              @default(0)
   purchases       Purchase[] // người mua
@@ -60,6 +62,7 @@ model Song {
   paymentSessions PaymentSession[] @relation("SongPaymentSessions")
   genres          Genre[] // implicit many-to-many
   createdAt       DateTime         @default(now())
+  comments     Comment[]   // 🆕 Quan hệ comments
 
   @@index([sellerId])
 }
@@ -75,6 +78,16 @@ model Purchase {
   song Song @relation(fields: [songId], references: [id], onDelete: Cascade)
 
   @@unique([userId, songId]) // 1 user mua 1 bài tối đa 1 lần
+}
+
+model Comment {
+  id        Int      @id @default(autoincrement())
+  content   String
+  createdAt DateTime @default(now())
+  songId    Int
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id])
+  song      Song     @relation(fields: [songId], references: [id])
 }
 
 model PaymentSession {

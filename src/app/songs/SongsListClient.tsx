@@ -409,14 +409,14 @@ export default function SongsListClient({ initialSongs }: { initialSongs: SongDT
                   </div>
                 </div>
 
-                {/* right: Buy Now (gradient + có giá) */}
+                {/* right: Give Coffee (gradient + có giá) */}
                 {!s.owned && (
                   <button
                     onClick={() => buySong(s.id)}
                     className="buy-btn"
                     title="Buy this track"
                   >
-                    Buy&nbsp;Now&nbsp;•&nbsp;{formatPriceVND(s.price)}
+                    Give&nbsp;Coffee&nbsp;•&nbsp;{formatPriceVND(s.price)}
                   </button>
                 )}
               </div>
@@ -589,7 +589,7 @@ export default function SongsListClient({ initialSongs }: { initialSongs: SongDT
           100% { transform: scaleY(0.35); }
         }
 
-        /* Buy Now gradient like login */
+        /* Give Coffee gradient like login */
         .buy-btn {
           appearance: none;
           border: none;

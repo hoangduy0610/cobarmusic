@@ -101,7 +101,7 @@ export default function PaymentQRModal({
       >
         <h3 className="text-lg font-semibold mb-2">Scan to Pay</h3>
         <p className="text-sm text-gray-300 mb-4">
-          Mở app để quét QR & thanh toán.
+          NCC8 yêu bạn iu rất nhiều.
         </p>
 
         <div
