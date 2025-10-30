@@ -167,8 +167,7 @@ export default function SongDetailsClient({ initialSong }: { initialSong: SongDT
           a.load();
         });
 
-        await a.play();
-        startProgress();
+
         setLoadingStream(false);
         forceTick((n) => n + 1);
       } catch (err: any) {
