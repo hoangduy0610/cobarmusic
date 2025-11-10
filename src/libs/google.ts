@@ -59,6 +59,8 @@ export async function getGoogleUserInfo(accessToken: string) {
   const redirectUri = mustEnv("MEZON_REDIRECT_URI");
   
   const res = await fetch("https://oauth2.mezon.ai/userinfo", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       access_token: accessToken,
       client_id: clientId,
