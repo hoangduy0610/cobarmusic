@@ -62,7 +62,7 @@ export default function LoginModal({
               "linear-gradient(90deg, rgba(168,85,247,1) 0%, rgba(99,102,241,1) 100%)",
           }}
         >
-          Login with Google
+          Login with Mezon
         </button>
 
         <button
